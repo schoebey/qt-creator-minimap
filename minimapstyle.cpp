@@ -1073,7 +1073,16 @@ void MinimapStyle::setSplitterColor(const QColor &splitterColor)
 
 QObject *MinimapStyle::createMinimapStyleObject(TextEditor::BaseTextEditor *editor)
 {
-    return new MinimapStyleObjectScrollingStrategy(editor);
+    switch (MinimapSettings::instance()->style())
+    {
+    case Minimap::EMinimapStyle::eScaling:
+        return new MinimapStyleObjectScalingStrategy(editor);
+        break;
+    case Minimap::EMinimapStyle::eScrolling:
+        return new MinimapStyleObjectScrollingStrategy(editor);
+        break;
+    }
+    return nullptr;
 }
 } // namespace Internal
 } // namespace Minimap
