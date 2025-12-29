@@ -221,7 +221,7 @@ public:
 
     const QImage& minimapImage() const { return m_image; }
 
-    virtual bool drawMinimap() = 0;
+    virtual bool drawMinimap(const QScrollBar *scrollbar) = 0;
 private:
     void init()
     {
@@ -398,7 +398,7 @@ public:
 
     ~MinimapStyleObjectScalingStrategy() { }
 
-    bool drawMinimap() override
+    bool drawMinimap(const QScrollBar* /*scrollbar*/) override
     {
         if (TextEditor::TextEditorSettings::displaySettings().m_textWrapping) {
             return false;
@@ -672,6 +672,257 @@ private:
     }
 };
 
+class MinimapStyleObjectScrollingStrategy : public MinimapStyleObject
+{
+public:
+    MinimapStyleObjectScrollingStrategy(TextEditor::BaseTextEditor *editor)
+        : MinimapStyleObject(editor)
+    {
+    }
+
+    ~MinimapStyleObjectScrollingStrategy() { }
+
+    bool drawMinimap(const QScrollBar *scrollbar) override
+    {
+        // 1. Basic Geometry Setup
+        int h = editor()->size().height();
+        int ppl = MinimapSettings::instance()->pixelsPerLine();
+        QColor baseBg = background();
+        QColor baseFg = foreground();
+        int w = width() - Constants::MINIMAP_EXTRA_AREA_WIDTH;
+        if (w <= 0 || h <= 0) {
+            return false;
+        }
+
+        int tab = editor()->textDocument()->tabSettings().m_tabSize;
+        bool codeFoldingVisible = editor()->codeFoldingVisible();
+        bool revisionsVisible = editor()->revisionsVisible();
+
+        // 1. GET THE ACTUAL VISIBLE HEIGHT (Units = lines)
+        // Qt's documentSize().height() returns the number of visible lines
+        // when using PlainTextEdit layouts.
+        qreal totalVisibleLines = editor()->document()->documentLayout()->documentSize().height();
+        qreal totalMinimapContentHeight = totalVisibleLines * ppl;
+
+        // 2. CALCULATE Panning Offset (panY)
+        // We must ensure that when the scrollbar is at 'max', the bottom of
+        // the document is exactly at the bottom of the widget.
+        qreal panY = 0;
+        if (totalMinimapContentHeight > h) {
+            // Correct Ratio: (Current / Max) * (Total Content - Widget Height)
+            qreal range = scrollbar->maximum() - scrollbar->minimum();
+            if (range > 0) {
+                qreal scrollPercent = static_cast<qreal>(scrollbar->value() - scrollbar->minimum()) / range;
+                panY = scrollPercent * (totalMinimapContentHeight - h);
+            }
+        }
+
+        // 3. DRAWING START POINT
+        // Find the first block to draw based on panY.
+        int firstLineIndex = qFloor(panY / ppl);
+        qreal subLineOffset = panY - (firstLineIndex * ppl);
+
+        // Finding the block via the layout is more robust than a manual loop
+        QTextBlock b = editor()->document()->firstBlock();
+
+        // Skip to the block that contains our first visible line
+        b = editor()->document()->findBlockByLineNumber(firstLineIndex);
+
+        // 4. RENDERING
+        m_image.fill(background());
+
+        int y = qRound(-subLineOffset);
+
+        // --- RENDERING LOOP ---
+        TextEditor::TextDocumentLayout *documentLayout =
+            qobject_cast<TextEditor::TextDocumentLayout *>(editor()->document()->documentLayout());
+
+        while (b.isValid() && y < h) {
+            if (!b.isVisible()) {
+                b = b.next();
+                continue;
+            }
+
+            bool folded = codeFoldingVisible && TextEditor::TextBlockUserData::isFolded(b);
+            int revision = 0;
+            if (revisionsVisible && b.revision() != documentLayout->lastSaveRevision) {
+                revision = (b.revision() < 0) ? 1 : 2;
+            }
+
+            // Render line pixels
+            QRgb *scanLine = reinterpret_cast<QRgb *>(m_image.scanLine(qMax(0, qMin(y, h - 1))));
+            int x = 0;
+            bool lineCont = true;
+
+            // Get highlighting formats
+            QVector<QTextLayout::FormatRange> formats = b.layout()->formats();
+            std::sort(formats.begin(), formats.end(), [](const QTextLayout::FormatRange &r1, const QTextLayout::FormatRange &r2) {
+                return r1.start < r2.start;
+            });
+
+            QColor bBg = baseBg;
+            QColor bFg = baseFg;
+            merge(bBg, bFg, b.charFormat());
+
+            auto itFormat = formats.begin();
+            for (QTextBlock::iterator it = b.begin(); !it.atEnd() && lineCont; ++it) {
+                QTextFragment f = it.fragment();
+                if (!f.isValid()) continue;
+
+                QColor fBg = bBg;
+                QColor fFg = bFg;
+                merge(fBg, fFg, f.charFormat());
+
+                QString text = f.text();
+                for (int i = 0; i < text.length(); ++i) {
+                    const QChar &c = text.at(i);
+                    QColor charBg = fBg;
+                    QColor charFg = fFg;
+
+                    // Apply syntax highlighting colors
+                    int fragPos = f.position() + i - b.position();
+                    while (itFormat != formats.end() && itFormat->start + itFormat->length <= fragPos) {
+                        ++itFormat;
+                    }
+                    if (itFormat != formats.end() && fragPos >= itFormat->start) {
+                        merge(charBg, charFg, itFormat->format);
+                    }
+
+                    lineCont = updatePixel(&scanLine[Constants::MINIMAP_EXTRA_AREA_WIDTH],
+                                           false, // blend
+                                           c, x, w, tab, charBg, charFg);
+                    if (!lineCont) break;
+                }
+            }
+
+            // Draw Revision and Folding markers
+            if (revision == 1) {
+                scanLine[1] = green;
+                scanLine[2] = green;
+            } else if (revision == 2) {
+                scanLine[1] = red;
+                scanLine[2] = red;
+            }
+            if (folded) {
+                scanLine[4] = black;
+                scanLine[5] = black;
+            }
+
+            // Duplicate for line height
+            for (int dy = 1; dy < ppl - 1; ++dy) {
+                if (y + dy >= 0 && y + dy < h)
+                    memcpy(m_image.scanLine(y + dy), scanLine, m_image.bytesPerLine());
+            }
+
+            y += ppl;
+            b = b.next();
+        }
+
+        return true;
+    }
+private:
+    void centerViewportOnMousePosition(const QPoint &mousePos) override
+    {
+        QScrollBar *scrollbar = m_editor->verticalScrollBar();
+
+        qreal documentHeight =
+            m_editor->document()->documentLayout()->documentSize().height();
+        int iNofVisibleLines = documentHeight;
+        int iMinimapHeight = iNofVisibleLines * MinimapSettings::instance()->pixelsPerLine();
+
+        int mouseY = qMax(0, mousePos.y() - m_slider.height() / 2);
+        int minimapRange = qMin(scrollbar->height(), iMinimapHeight) - m_slider.height();
+
+        qreal relativePosition = static_cast<qreal>(mouseY) / minimapRange;
+
+        int iMax = scrollbar->maximum();
+        int iMin = scrollbar->minimum();
+        int iValue = iMin + (iMax - iMin) * relativePosition;
+        scrollbar->setValue(iValue);
+    }
+
+    void update() override
+    {
+        QScrollBar *scrollbar = m_editor->verticalScrollBar();
+
+        // should be line count
+        // multiplied by ppl results in the height of the image needed to render the whole doc
+        m_lineCount = qMax(m_editor->document()->blockCount(), 1);
+        int docHeight = m_lineCount * MinimapSettings::instance()->pixelsPerLine();
+
+        int w = scrollbar->width();
+        int h = scrollbar->height();
+        int width = this->width();
+        m_groove = QRect(width, 0, w - width, qMin(docHeight, h));
+        updateSubControlRects();
+        scrollbar->updateGeometry();
+
+        m_image = QImage(width, editor()->size().height(), QImage::Format_RGB32);
+
+        m_update = false;
+    }
+
+    void updateSubControlRects() override
+    {
+        QScrollBar *scrollbar = m_editor->verticalScrollBar();
+
+        if (m_lineCount <= 0) {
+            m_addPage = QRect();
+            m_subPage = QRect();
+            m_slider = QRect();
+            return;
+        }
+
+        int ppl = MinimapSettings::instance()->pixelsPerLine();
+        int viewportHeight = m_editor->viewport()->height();
+
+        // Calculate how many lines actually fit in the editor viewport
+        int lineHeight = m_editor->fontMetrics().lineSpacing();
+        if (lineHeight <= 0) lineHeight = 1;
+        int actualLinesInViewport = qMax(1, viewportHeight / lineHeight);
+
+        // The height of the slider in the minimap should represent the visible lines
+        int viewPortHeightInMinimap = actualLinesInViewport * ppl;
+
+        int w = scrollbar->width();
+        int h = scrollbar->height();
+        int value = scrollbar->value();
+        int min = scrollbar->minimum();
+        int max = scrollbar->maximum();
+
+        // The total height of the document as rendered in the minimap
+        qreal documentNofVisibleLines = m_editor->document()->documentLayout()->documentSize().height();
+        int actualContentHeight = qRound(documentNofVisibleLines * ppl);
+
+        // Ensure we don't calculate beyond the scrollbar height
+        int effectiveMinimapHeight = qMin(actualContentHeight, h);
+
+        qreal realValue = 0;
+        if (max > min && effectiveMinimapHeight > viewPortHeightInMinimap) {
+            qreal scrollRatio = static_cast<qreal>(value - min) / (max - min);
+            qreal maxSliderTop = effectiveMinimapHeight - viewPortHeightInMinimap;
+
+            // FIX: Snap the slider position to the nearest "line" in the minimap.
+            // This prevents the slider from being "between lines" which causes the jumping.
+            qreal rawPosition = scrollRatio * maxSliderTop;
+            realValue = qRound(rawPosition / ppl) * ppl;
+
+            realValue = qBound(0., realValue, maxSliderTop);
+        }
+
+        // Finalize the geometry
+        m_subPage = (realValue > 0) ? QRect(0, 0, w, qFloor(realValue)) : QRect();
+
+        m_slider = QRect(0, realValue, w, viewPortHeightInMinimap);
+
+        int addPageTop = qCeil(realValue + viewPortHeightInMinimap);
+        m_addPage = (addPageTop < h) ? QRect(0, addPageTop, w, h - addPageTop) : QRect();
+
+        scrollbar->update();
+    }
+};
+
+
 MinimapStyle::MinimapStyle(QStyle *style) : QProxyStyle(style) {}
 
 void MinimapStyle::drawComplexControl(ComplexControl control,
@@ -789,7 +1040,7 @@ bool MinimapStyle::drawMinimap(const QStyleOptionComplex *option,
         return false;
     }
 
-    o->drawMinimap();
+    o->drawMinimap(scrollbar);
 
     painter->save();
     painter->fillRect(option->rect, o->background());
@@ -822,7 +1073,7 @@ void MinimapStyle::setSplitterColor(const QColor &splitterColor)
 
 QObject *MinimapStyle::createMinimapStyleObject(TextEditor::BaseTextEditor *editor)
 {
-    return new MinimapStyleObjectScalingStrategy(editor);
+    return new MinimapStyleObjectScrollingStrategy(editor);
 }
 } // namespace Internal
 } // namespace Minimap
