@@ -221,7 +221,184 @@ public:
 
     const QImage& minimapImage() const { return m_image; }
 
-    bool drawMinimap()
+    virtual bool drawMinimap() = 0;
+private:
+    void init()
+    {
+        QScrollBar *scrollbar = m_editor->verticalScrollBar();
+        scrollbar->setProperty(Constants::MINIMAP_STYLE_OBJECT_PROPERTY,
+                               QVariant::fromValue<QObject *>(this));
+
+        scrollbar->installEventFilter(this);
+
+        connect(m_editor->textDocument(),
+                &TextEditor::TextDocument::fontSettingsChanged,
+                this,
+                &MinimapStyleObject::fontSettingsChanged);
+        connect(m_editor->document()->documentLayout(),
+                &QAbstractTextDocumentLayout::documentSizeChanged,
+                this,
+                &MinimapStyleObject::deferedUpdate);
+        connect(m_editor->document()->documentLayout(),
+                &QAbstractTextDocumentLayout::update,
+                this,
+                &MinimapStyleObject::deferedUpdate);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::enabledChanged,
+                this,
+                &MinimapStyleObject::deferedUpdate);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::widthChanged,
+                this,
+                &MinimapStyleObject::deferedUpdate);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::lineCountThresholdChanged,
+                this,
+                &MinimapStyleObject::deferedUpdate);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::alphaChanged,
+                this,
+                &MinimapStyleObject::fontSettingsChanged);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::centerOnClickChanged,
+                this,
+                &MinimapStyleObject::centerOnClickChanged);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::showLineTooltipChanged,
+                this,
+                &MinimapStyleObject::showLineTooltipChanged);
+        connect(scrollbar,
+                &QAbstractSlider::valueChanged,
+                this,
+                &MinimapStyleObject::updateSubControlRects);
+        connect(MinimapSettings::instance(),
+                &MinimapSettings::pixelsPerLineChanged,
+                this,
+                &MinimapStyleObject::deferedUpdate);
+
+        fontSettingsChanged();
+    }
+
+    virtual void centerViewportOnMousePosition(const QPoint &mousePos) = 0;
+
+    void centerOnClickChanged()
+    {
+        QScrollBar *scrollbar = m_editor->verticalScrollBar();
+        // Always keep event filter installed since we need it for tooltips too
+        scrollbar->installEventFilter(this);
+
+        if (!MinimapSettings::centerOnClick()) {
+            m_isDragging = false;
+            scrollbar->setMouseTracking(false);
+            // Only hide tooltip if tooltip setting is also disabled
+            if (!MinimapSettings::showLineTooltip()) {
+                QToolTip::hideText();
+            }
+        }
+    }
+
+    void showLineTooltipChanged()
+    {
+        if (!MinimapSettings::showLineTooltip()) {
+            QToolTip::hideText();
+        }
+    }
+
+    void showLineRangeTooltip(const QPoint &globalPos)
+    {
+        QPair<int, int> visibleRange = getVisibleLineRange();
+        int s = visibleRange.first;
+        int e = visibleRange.second;
+
+        QString tooltipText = QString("<center>%1<br>—<br>%2</center>").arg(s).arg(e);
+        QToolTip::showText(globalPos, tooltipText, m_editor->verticalScrollBar());
+    }
+
+    QPair<int, int> getVisibleLineRange() const
+    {
+        QRect viewport = m_editor->viewport()->rect();
+
+        QTextCursor topCursor = m_editor->cursorForPosition(QPoint(0, 0));
+
+        QTextCursor bottomCursor = m_editor->cursorForPosition(QPoint(0, viewport.height() - 1));
+
+        // Convert to line numbers (1-based for user display)
+        int firstVisibleLine = topCursor.blockNumber() + 1;
+        int lastVisibleLine = bottomCursor.blockNumber() + 1;
+
+        firstVisibleLine = qMax(1, firstVisibleLine);
+        lastVisibleLine = qMax(firstVisibleLine, lastVisibleLine);
+        lastVisibleLine = qMin(lastVisibleLine, m_lineCount);
+
+        return QPair<int, int>(firstVisibleLine, lastVisibleLine);
+    }
+
+    void contentsChanged()
+    {
+        disconnect(m_editor->textDocument()->document(),
+                   &QTextDocument::contentsChanged,
+                   this,
+                   &MinimapStyleObject::contentsChanged);
+        init();
+    }
+
+    void fontSettingsChanged()
+    {
+        const TextEditor::FontSettings &settings = m_editor->textDocument()->fontSettings();
+        m_backgroundColor = settings.formatFor(TextEditor::C_TEXT).background();
+        if (!m_backgroundColor.isValid()) {
+            m_backgroundColor = m_theme->color(Utils::Theme::BackgroundColorNormal);
+        }
+        m_foregroundColor = settings.formatFor(TextEditor::C_TEXT).foreground();
+        if (!m_foregroundColor.isValid()) {
+            m_foregroundColor = m_theme->color(Utils::Theme::TextColorNormal);
+        }
+        if (m_backgroundColor.value() < 128) {
+            m_overlayColor = QColor(Qt::white);
+        } else {
+            m_overlayColor = QColor(Qt::black);
+        }
+        m_overlayColor.setAlpha(MinimapSettings::alpha());
+        deferedUpdate();
+    }
+
+    void deferedUpdate()
+    {
+        if (m_update) {
+            return;
+        }
+        m_update = true;
+        QTimer::singleShot(0, this, &MinimapStyleObject::update);
+    }
+
+    virtual void update() = 0;
+
+    virtual void updateSubControlRects() = 0;
+
+protected:
+    Utils::Theme *m_theme;
+    TextEditor::TextEditorWidget *m_editor;
+    qreal m_factor;
+    int m_lineCount;
+    QRect m_groove, m_addPage, m_subPage, m_slider;
+    QColor m_backgroundColor, m_foregroundColor, m_overlayColor;
+    bool m_update;
+    bool m_isDragging;
+    QPoint m_lastMousePos;
+    QImage m_image;
+};
+
+class MinimapStyleObjectScalingStrategy : public MinimapStyleObject
+{
+public:
+    MinimapStyleObjectScalingStrategy(TextEditor::BaseTextEditor *editor)
+        : MinimapStyleObject(editor)
+    {
+    }
+
+    ~MinimapStyleObjectScalingStrategy() { }
+
+    bool drawMinimap() override
     {
         if (TextEditor::TextEditorSettings::displaySettings().m_textWrapping) {
             return false;
@@ -361,63 +538,7 @@ public:
         return true;
     }
 private:
-    void init()
-    {
-        QScrollBar *scrollbar = m_editor->verticalScrollBar();
-        scrollbar->setProperty(Constants::MINIMAP_STYLE_OBJECT_PROPERTY,
-                               QVariant::fromValue<QObject *>(this));
-
-        scrollbar->installEventFilter(this);
-
-        connect(m_editor->textDocument(),
-                &TextEditor::TextDocument::fontSettingsChanged,
-                this,
-                &MinimapStyleObject::fontSettingsChanged);
-        connect(m_editor->document()->documentLayout(),
-                &QAbstractTextDocumentLayout::documentSizeChanged,
-                this,
-                &MinimapStyleObject::deferedUpdate);
-        connect(m_editor->document()->documentLayout(),
-                &QAbstractTextDocumentLayout::update,
-                this,
-                &MinimapStyleObject::deferedUpdate);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::enabledChanged,
-                this,
-                &MinimapStyleObject::deferedUpdate);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::widthChanged,
-                this,
-                &MinimapStyleObject::deferedUpdate);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::lineCountThresholdChanged,
-                this,
-                &MinimapStyleObject::deferedUpdate);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::alphaChanged,
-                this,
-                &MinimapStyleObject::fontSettingsChanged);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::centerOnClickChanged,
-                this,
-                &MinimapStyleObject::centerOnClickChanged);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::showLineTooltipChanged,
-                this,
-                &MinimapStyleObject::showLineTooltipChanged);
-        connect(scrollbar,
-                &QAbstractSlider::valueChanged,
-                this,
-                &MinimapStyleObject::updateSubControlRects);
-        connect(MinimapSettings::instance(),
-                &MinimapSettings::pixelsPerLineChanged,
-                this,
-                &MinimapStyleObject::deferedUpdate);
-
-        fontSettingsChanged();
-    }
-
-    void centerViewportOnMousePosition(const QPoint &mousePos)
+    void centerViewportOnMousePosition(const QPoint &mousePos) override
     {
         QScrollBar *scrollbar = m_editor->verticalScrollBar();
 
@@ -473,97 +594,7 @@ private:
         }
     }
 
-    void centerOnClickChanged()
-    {
-        QScrollBar *scrollbar = m_editor->verticalScrollBar();
-        // Always keep event filter installed since we need it for tooltips too
-        scrollbar->installEventFilter(this);
-
-        if (!MinimapSettings::centerOnClick()) {
-            m_isDragging = false;
-            scrollbar->setMouseTracking(false);
-            // Only hide tooltip if tooltip setting is also disabled
-            if (!MinimapSettings::showLineTooltip()) {
-                QToolTip::hideText();
-            }
-        }
-    }
-
-    void showLineTooltipChanged()
-    {
-        if (!MinimapSettings::showLineTooltip()) {
-            QToolTip::hideText();
-        }
-    }
-
-    void showLineRangeTooltip(const QPoint &globalPos)
-    {
-        QPair<int, int> visibleRange = getVisibleLineRange();
-        int s = visibleRange.first;
-        int e = visibleRange.second;
-
-        QString tooltipText = QString("<center>%1<br>—<br>%2</center>").arg(s).arg(e);
-        QToolTip::showText(globalPos, tooltipText, m_editor->verticalScrollBar());
-    }
-
-    QPair<int, int> getVisibleLineRange() const
-    {
-        QRect viewport = m_editor->viewport()->rect();
-
-        QTextCursor topCursor = m_editor->cursorForPosition(QPoint(0, 0));
-
-        QTextCursor bottomCursor = m_editor->cursorForPosition(QPoint(0, viewport.height() - 1));
-
-        // Convert to line numbers (1-based for user display)
-        int firstVisibleLine = topCursor.blockNumber() + 1;
-        int lastVisibleLine = bottomCursor.blockNumber() + 1;
-
-        firstVisibleLine = qMax(1, firstVisibleLine);
-        lastVisibleLine = qMax(firstVisibleLine, lastVisibleLine);
-        lastVisibleLine = qMin(lastVisibleLine, m_lineCount);
-
-        return QPair<int, int>(firstVisibleLine, lastVisibleLine);
-    }
-
-    void contentsChanged()
-    {
-        disconnect(m_editor->textDocument()->document(),
-                   &QTextDocument::contentsChanged,
-                   this,
-                   &MinimapStyleObject::contentsChanged);
-        init();
-    }
-
-    void fontSettingsChanged()
-    {
-        const TextEditor::FontSettings &settings = m_editor->textDocument()->fontSettings();
-        m_backgroundColor = settings.formatFor(TextEditor::C_TEXT).background();
-        if (!m_backgroundColor.isValid()) {
-            m_backgroundColor = m_theme->color(Utils::Theme::BackgroundColorNormal);
-        }
-        m_foregroundColor = settings.formatFor(TextEditor::C_TEXT).foreground();
-        if (!m_foregroundColor.isValid()) {
-            m_foregroundColor = m_theme->color(Utils::Theme::TextColorNormal);
-        }
-        if (m_backgroundColor.value() < 128) {
-            m_overlayColor = QColor(Qt::white);
-        } else {
-            m_overlayColor = QColor(Qt::black);
-        }
-        m_overlayColor.setAlpha(MinimapSettings::alpha());
-        deferedUpdate();
-    }
-
-    void deferedUpdate()
-    {
-        if (m_update) {
-            return;
-        }
-        m_update = true;
-        QTimer::singleShot(0, this, &MinimapStyleObject::update);
-    }
-
-    void update()
+    void update() override
     {
         QScrollBar *scrollbar = m_editor->verticalScrollBar();
 
@@ -581,7 +612,7 @@ private:
         m_update = false;
     }
 
-    void updateSubControlRects()
+    void updateSubControlRects() override
     {
         QScrollBar *scrollbar = m_editor->verticalScrollBar();
 
@@ -639,17 +670,6 @@ private:
 
         scrollbar->update();
     }
-
-    Utils::Theme *m_theme;
-    TextEditor::TextEditorWidget *m_editor;
-    qreal m_factor;
-    int m_lineCount;
-    QRect m_groove, m_addPage, m_subPage, m_slider;
-    QColor m_backgroundColor, m_foregroundColor, m_overlayColor;
-    bool m_update;
-    bool m_isDragging;
-    QPoint m_lastMousePos;
-    QImage m_image;
 };
 
 MinimapStyle::MinimapStyle(QStyle *style) : QProxyStyle(style) {}
@@ -802,7 +822,7 @@ void MinimapStyle::setSplitterColor(const QColor &splitterColor)
 
 QObject *MinimapStyle::createMinimapStyleObject(TextEditor::BaseTextEditor *editor)
 {
-    return new MinimapStyleObject(editor);
+    return new MinimapStyleObjectScalingStrategy(editor);
 }
 } // namespace Internal
 } // namespace Minimap
