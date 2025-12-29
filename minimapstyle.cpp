@@ -219,6 +219,147 @@ public:
 
     TextEditor::TextEditorWidget *editor() const { return m_editor; }
 
+    const QImage& minimapImage() const { return m_image; }
+
+    bool drawMinimap()
+    {
+        if (TextEditor::TextEditorSettings::displaySettings().m_textWrapping) {
+            return false;
+        }
+        int h = editor()->size().height();
+        if (m_factor < 1.0) {
+            h = lineCount();
+        }
+        qreal step = 1 / m_factor;
+        QColor baseBg = background();
+        QColor baseFg = foreground();
+        int w = width() - Constants::MINIMAP_EXTRA_AREA_WIDTH;
+        if (w <= 0 || h <= 0) {
+            return false;
+        }
+
+        m_image.fill(baseBg);
+        QTextDocument *doc = editor()->document();
+        TextEditor::TextDocumentLayout *documentLayout = qobject_cast<TextEditor::TextDocumentLayout *>(
+            doc->documentLayout());
+        int tab = editor()->textDocument()->tabSettings().m_tabSize;
+        int y(0);
+        int i(0);
+        qreal r(0.0);
+        bool codeFoldingVisible = editor()->codeFoldingVisible();
+        bool revisionsVisible = editor()->revisionsVisible();
+        bool folded(false);
+        int revision(0);
+        for (QTextBlock b = doc->begin(); b.isValid() && y < h; b = b.next()) {
+            bool updateY(true);
+            if (b.isVisible()) {
+                if (qRound(r) != i++) {
+                    updateY = false;
+                } else {
+                    r += step;
+                }
+            } else {
+                continue;
+            }
+            if (codeFoldingVisible && !folded) {
+                folded = TextEditor::TextBlockUserData::isFolded(b);
+            }
+            if (revisionsVisible) {
+                if (b.revision() != documentLayout->lastSaveRevision) {
+                    if (revision < 1 && b.revision() < 0) {
+                        revision = 1;
+                    } else if (revision < 2) {
+                        revision = 2;
+                    }
+                }
+            }
+            int x(0);
+            bool cont(true);
+            QRgb *scanLine = reinterpret_cast<QRgb *>(m_image.scanLine(y * MinimapSettings::instance()->pixelsPerLine()));
+            QVector<QTextLayout::FormatRange> formats = b.layout()->formats();
+            std::sort(formats.begin(),
+                      formats.end(),
+                      [](const QTextLayout::FormatRange &r1, const QTextLayout::FormatRange &r2) {
+                          if (r1.start < r2.start) {
+                              return true;
+                          } else if (r1.start > r2.start) {
+                              return false;
+                          }
+                          return r1.length < r2.length;
+                      });
+            QColor bBg = baseBg;
+            QColor bFg = baseFg;
+            merge(bBg, bFg, b.charFormat());
+            auto it2 = formats.begin();
+            for (QTextBlock::iterator it = b.begin(); !(it.atEnd()); ++it) {
+                QTextFragment f = it.fragment();
+                if (f.isValid()) {
+                    QColor fBg = bBg;
+                    QColor fFg = bFg;
+                    merge(fBg, fFg, f.charFormat());
+                    for (const QChar &c : f.text()) {
+                        QColor bg = fBg;
+                        QColor fg = fFg;
+                        it2 = std::find_if(it2, formats.end(), [&x](const QTextLayout::FormatRange &r) {
+                            return x >= r.start && x < r.start + r.length;
+                        });
+                        if (it2 != formats.end()) {
+                            merge(bg, fg, it2->format);
+                        }
+                        cont = updatePixel(&scanLine[Constants::MINIMAP_EXTRA_AREA_WIDTH],
+                                           !updateY,
+                                           c,
+                                           x,
+                                           w,
+                                           tab,
+                                           bg,
+                                           fg);
+                        if (!cont) {
+                            break;
+                        }
+                    }
+                    if (!cont) {
+                        break;
+                    }
+                } else {
+                    cont = false;
+                    break;
+                }
+            }
+
+
+            int originalY = y;
+            if (updateY) {
+                ++y;
+                if (revision == 1) {
+                    scanLine[1] = green;
+                    scanLine[2] = green;
+                } else if (revision == 2) {
+                    scanLine[1] = red;
+                    scanLine[2] = red;
+                }
+                if (folded) {
+                    scanLine[4] = black;
+                    scanLine[5] = black;
+                }
+                folded = false;
+                revision = 0;
+            }
+
+            // repeat the line on the next lines to give every line a height of
+            // (pixelsPerLine - 1), resulting in a 1px gap between lines
+            for (int duplicationLineY = 1;
+                 duplicationLineY < MinimapSettings::instance()->pixelsPerLine() - 1;
+                 ++duplicationLineY) {
+                QRgb *targetScanLine = reinterpret_cast<QRgb *>(m_image.scanLine(
+                    originalY * MinimapSettings::instance()->pixelsPerLine() + duplicationLineY));
+
+                memcpy(targetScanLine, scanLine, m_image.bytesPerLine());
+            }
+        }
+
+        return true;
+    }
 private:
     void init()
     {
@@ -436,6 +577,7 @@ private:
         m_groove = QRect(width, 0, w - width, qMin(m_lineCount, h));
         updateSubControlRects();
         scrollbar->updateGeometry();
+        m_image = QImage(width, h * MinimapSettings::instance()->pixelsPerLine(), QImage::Format_RGB32);
         m_update = false;
     }
 
@@ -507,6 +649,7 @@ private:
     bool m_update;
     bool m_isDragging;
     QPoint m_lastMousePos;
+    QImage m_image;
 };
 
 MinimapStyle::MinimapStyle(QStyle *style) : QProxyStyle(style) {}
@@ -621,148 +764,16 @@ bool MinimapStyle::drawMinimap(const QStyleOptionComplex *option,
                                const QWidget *widget,
                                MinimapStyleObject *o) const
 {
-    if (TextEditor::TextEditorSettings::displaySettings().m_textWrapping) {
-        return false;
-    }
     const QScrollBar *scrollbar = qobject_cast<const QScrollBar *>(widget);
     if (!scrollbar) {
         return false;
     }
-    int h = o->editor()->size().height();
-    qreal factor = o->factor();
-    if (factor < 1.0) {
-        h = o->lineCount();
-    }
-    qreal step = 1 / factor;
-    QColor baseBg = o->background();
-    QColor baseFg = o->foreground();
-    int w = o->width() - Constants::MINIMAP_EXTRA_AREA_WIDTH;
-    if (w <= 0 || h <= 0) {
-        return false;
-    }
-    QImage image(o->width(), h * MinimapSettings::instance()->pixelsPerLine(), QImage::Format_RGB32);
-    image.fill(baseBg);
-    QTextDocument *doc = o->editor()->document();
-    TextEditor::TextDocumentLayout *documentLayout = qobject_cast<TextEditor::TextDocumentLayout *>(
-        doc->documentLayout());
-    int tab = o->editor()->textDocument()->tabSettings().m_tabSize;
-    int y(0);
-    int i(0);
-    qreal r(0.0);
-    bool codeFoldingVisible = o->editor()->codeFoldingVisible();
-    bool revisionsVisible = o->editor()->revisionsVisible();
-    bool folded(false);
-    int revision(0);
-    for (QTextBlock b = doc->begin(); b.isValid() && y < h; b = b.next()) {
-        bool updateY(true);
-        if (b.isVisible()) {
-            if (qRound(r) != i++) {
-                updateY = false;
-            } else {
-                r += step;
-            }
-        } else {
-            continue;
-        }
-        if (codeFoldingVisible && !folded) {
-            folded = TextEditor::TextBlockUserData::isFolded(b);
-        }
-        if (revisionsVisible) {
-            if (b.revision() != documentLayout->lastSaveRevision) {
-                if (revision < 1 && b.revision() < 0) {
-                    revision = 1;
-                } else if (revision < 2) {
-                    revision = 2;
-                }
-            }
-        }
-        int x(0);
-        bool cont(true);
-        QRgb *scanLine = reinterpret_cast<QRgb *>(image.scanLine(y * MinimapSettings::instance()->pixelsPerLine()));
-        QVector<QTextLayout::FormatRange> formats = b.layout()->formats();
-        std::sort(formats.begin(),
-                  formats.end(),
-                  [](const QTextLayout::FormatRange &r1, const QTextLayout::FormatRange &r2) {
-                      if (r1.start < r2.start) {
-                          return true;
-                      } else if (r1.start > r2.start) {
-                          return false;
-                      }
-                      return r1.length < r2.length;
-                  });
-        QColor bBg = baseBg;
-        QColor bFg = baseFg;
-        merge(bBg, bFg, b.charFormat());
-        auto it2 = formats.begin();
-        for (QTextBlock::iterator it = b.begin(); !(it.atEnd()); ++it) {
-            QTextFragment f = it.fragment();
-            if (f.isValid()) {
-                QColor fBg = bBg;
-                QColor fFg = bFg;
-                merge(fBg, fFg, f.charFormat());
-                for (const QChar &c : f.text()) {
-                    QColor bg = fBg;
-                    QColor fg = fFg;
-                    it2 = std::find_if(it2, formats.end(), [&x](const QTextLayout::FormatRange &r) {
-                        return x >= r.start && x < r.start + r.length;
-                    });
-                    if (it2 != formats.end()) {
-                        merge(bg, fg, it2->format);
-                    }
-                    cont = updatePixel(&scanLine[Constants::MINIMAP_EXTRA_AREA_WIDTH],
-                                       !updateY,
-                                       c,
-                                       x,
-                                       w,
-                                       tab,
-                                       bg,
-                                       fg);
-                    if (!cont) {
-                        break;
-                    }
-                }
-                if (!cont) {
-                    break;
-                }
-            } else {
-                cont = false;
-                break;
-            }
-        }
 
+    o->drawMinimap();
 
-        int originalY = y;
-        if (updateY) {
-            ++y;
-            if (revision == 1) {
-                scanLine[1] = green;
-                scanLine[2] = green;
-            } else if (revision == 2) {
-                scanLine[1] = red;
-                scanLine[2] = red;
-            }
-            if (folded) {
-                scanLine[4] = black;
-                scanLine[5] = black;
-            }
-            folded = false;
-            revision = 0;
-        }
-
-        // repeat the line on the next lines to give every line a height of
-        // (pixelsPerLine - 1), resulting in a 1px gap between lines
-        for (int duplicationLineY = 1;
-             duplicationLineY < MinimapSettings::instance()->pixelsPerLine() - 1;
-             ++duplicationLineY) {
-            QRgb *targetScanLine = reinterpret_cast<QRgb *>(image.scanLine(
-                originalY * MinimapSettings::instance()->pixelsPerLine() + duplicationLineY));
-
-            memcpy(targetScanLine, scanLine, image.bytesPerLine());
-        }
-    }
     painter->save();
-    painter->fillRect(option->rect, baseBg);
-    painter->drawImage(option->rect, image, option->rect);
+    painter->fillRect(option->rect, o->background());
+    painter->drawImage(option->rect, o->minimapImage(), option->rect);
     painter->setPen(Qt::NoPen);
     painter->setBrush(o->overlay());
     QRect rect = subControlRect(QStyle::CC_ScrollBar, option, QStyle::SC_ScrollBarSlider, widget)
