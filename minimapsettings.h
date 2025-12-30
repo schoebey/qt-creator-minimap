@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include "minimapconstants.h"
+
 #include <QObject>
 
 #include <utils/store.h>
@@ -47,6 +49,7 @@ public:
     static bool centerOnClick();
     static bool showLineTooltip();
     static int pixelsPerLine();
+    static EMinimapStyle style();
 
 signals:
     void enabledChanged(bool);
@@ -56,6 +59,7 @@ signals:
     void centerOnClickChanged(bool);
     void showLineTooltipChanged(bool);
     void pixelsPerLineChanged(int);
+    void styleChanged(Minimap::EMinimapStyle);
 
 private:
     friend class MinimapSettingsPageWidget;
@@ -67,6 +71,7 @@ private:
     void setCenterOnClick(bool centerOnClick);
     void setShowLineTooltip(bool showLineTooltip);
     void setPixelsPerLine(int pixelsPerLine);
+    void setStyle(EMinimapStyle style);
 
     bool m_enabled;
     int m_width;
@@ -75,6 +80,7 @@ private:
     bool m_centerOnClick;
     bool m_showLineTooltip;
     int m_pixelsPerLine;
+    EMinimapStyle m_style;
     MinimapSettingsPage *m_settingsPage;
 };
 } // namespace Internal

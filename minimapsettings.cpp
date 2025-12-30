@@ -19,7 +19,6 @@
 */
 
 #include "minimapsettings.h"
-#include "minimapconstants.h"
 #include "minimaptr.h"
 
 #include <coreplugin/icore.h>
@@ -31,6 +30,7 @@
 #include <utils/store.h>
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QPointer>
@@ -51,6 +51,7 @@ const char alphaKey[] = "Alpha";
 const char centerOnClickKey[] = "CenterOnClick";
 const char showLineTooltipKey[] = "ShowLineTooltip";
 const char pixelsPerLineKey[] = "PixelsPerLine";
+const char styleKey[] = "DisplayStyle";
 
 MinimapSettings *m_instance = 0;
 } // namespace
@@ -111,6 +112,12 @@ public:
         m_pixelsPerLine->setValue(m_instance->m_pixelsPerLine);
         form->addRow(Tr::tr("Pixels per line:"), m_pixelsPerLine);
 
+        m_styleComboBox = new QComboBox;
+        m_styleComboBox->addItem(Tr::tr("scale minimap to editor height"), static_cast<int>(EMinimapStyle::eScaling));
+        m_styleComboBox->addItem(Tr::tr("scroll minimap"), static_cast<int>(EMinimapStyle::eScrolling));
+        m_styleComboBox->setCurrentIndex(m_styleComboBox->findData(static_cast<int>(m_instance->m_style)));
+        form->addRow(Tr::tr("Display behaviour for large documents:"), m_styleComboBox);
+
         groupBox->setLayout(form);
         setLayout(layout);
         setEnabled(!m_textWrapping);
@@ -149,6 +156,10 @@ public:
             m_instance->setPixelsPerLine(m_pixelsPerLine->value());
             save = true;
         }
+        if (static_cast<EMinimapStyle>(m_styleComboBox->currentData().toInt()) != MinimapSettings::style()) {
+            m_instance->setStyle(static_cast<EMinimapStyle>(m_styleComboBox->currentData().toInt()));
+            save = true;
+        }
         if (save) {
             Utils::storeToSettings(Utils::keyFromString(minimapPostFix),
                                    Core::ICore::settings(),
@@ -172,6 +183,7 @@ private:
     QCheckBox *m_centerOnClick;
     QCheckBox *m_showLineTooltip;
     QSpinBox *m_pixelsPerLine;
+    QComboBox* m_styleComboBox;
     bool m_textWrapping;
 };
 
@@ -196,6 +208,7 @@ MinimapSettings::MinimapSettings(QObject *parent)
     , m_centerOnClick(Constants::MINIMAP_CENTER_ON_CLICK_DEFAULT)
     , m_showLineTooltip(Constants::MINIMAP_SHOW_LINE_TOOLTIP_DEFAULT)
     , m_pixelsPerLine(Constants::MINIMAP_PIXELS_PER_LINE_DEFAULT)
+    , m_style(Constants::MINIMAP_STYLE_DEFAULT)
 {
     QTC_ASSERT(!m_instance, return);
     m_instance = this;
@@ -223,6 +236,7 @@ Utils::Store MinimapSettings::toMap() const
     map.insert(centerOnClickKey, m_centerOnClick);
     map.insert(showLineTooltipKey, m_showLineTooltip);
     map.insert(pixelsPerLineKey, m_pixelsPerLine);
+    map.insert(styleKey, static_cast<int>(m_style));
     return map;
 }
 
@@ -235,6 +249,7 @@ void MinimapSettings::fromMap(const Utils::Store &map)
     m_centerOnClick = map.value(centerOnClickKey, m_centerOnClick).toBool();
     m_showLineTooltip = map.value(showLineTooltipKey, m_showLineTooltip).toBool();
     m_pixelsPerLine = map.value(pixelsPerLineKey, m_pixelsPerLine).toInt();
+    m_style = static_cast<EMinimapStyle>(map.value(styleKey, static_cast<int>(m_style)).toInt());
 }
 
 bool MinimapSettings::enabled()
@@ -270,6 +285,11 @@ bool MinimapSettings::showLineTooltip()
 int MinimapSettings::pixelsPerLine()
 {
     return m_instance->m_pixelsPerLine;
+}
+
+EMinimapStyle MinimapSettings::style()
+{
+    return m_instance->m_style;
 }
 
 void MinimapSettings::setEnabled(bool enabled)
@@ -325,6 +345,14 @@ void MinimapSettings::setPixelsPerLine(int pixelsPerLine)
     if (m_pixelsPerLine != pixelsPerLine) {
         m_pixelsPerLine = pixelsPerLine;
         emit pixelsPerLineChanged(pixelsPerLine);
+    }
+}
+
+void MinimapSettings::setStyle(EMinimapStyle style)
+{
+    if (m_style != style)    {
+        m_style = style;
+        emit styleChanged(style);
     }
 }
 } // namespace Internal

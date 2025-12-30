@@ -25,6 +25,13 @@
 #pragma once
 
 namespace Minimap {
+
+enum class EMinimapStyle
+{
+    eScaling,
+    eScrolling
+};
+
 namespace Constants {
 const char MINIMAP_ID[] = "Minimap.Minimap";
 const char MINIMAP_SETTINGS[] = "Z.MinimapSettings";
@@ -36,5 +43,6 @@ const int MINIMAP_ALPHA_DEFAULT = 32;
 const bool MINIMAP_CENTER_ON_CLICK_DEFAULT = true;
 const bool MINIMAP_SHOW_LINE_TOOLTIP_DEFAULT = true;
 const int MINIMAP_PIXELS_PER_LINE_DEFAULT = 2;
+const EMinimapStyle MINIMAP_STYLE_DEFAULT = EMinimapStyle::eScrolling;
 } // namespace Constants
 } // namespace Minimap
